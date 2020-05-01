@@ -1,18 +1,17 @@
 import pandas as pd
 import numpy as np
+from dask import dataframe as dd
 import os
+
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
-import treelite.gallery.sklearn
+
+from compiledtrees import code_gen
 
 
 def csvs_to_dataframes(csv_files):
-    dfs = []
-    for file in csv_files:
-        dfs.append(pd.read_csv(file))
-
-    return pd.concat(dfs, ignore_index=True)
+    return dd.read_csv(csv_files).compute(scheduler='threads')
 
 
 def get_arg_cols(df):
@@ -32,8 +31,8 @@ def extract_medians(df, arg_cols=None, target_field="time"):
 def add_percentiles(df, arg_cols=None, target_field="time"):
     def compute_rank(values, bins=10):
         if len(values) < bins:
-            raise Exception("Cannot parse this kernel with {} bins it a group "
-                            "only has {} samples".format(bins, len(values)))
+            raise Exception("Cannot parse this kernel with {} bins it's a group "
+                            "with only {} samples".format(bins, len(values)))
         varray = values.to_numpy()
         svals = sorted(varray)
         nvals = len(svals)
@@ -78,68 +77,59 @@ def train_RF_model(X, y, n_jobs=-1, criterion="mse", n_estimators=100):
     return model
 
 
+def clean_up_code(lines, new_name=None):
+    def clean_line(line):
+        line = line.lstrip()
+        if "evaluate" in line:
+            if "__attribute__((__always_inline__))" in line:
+                declaration = line.find("double")
+                line = line[declaration:]
+            elif "+=" not in line:  # This is the declaration
+                line = "__attribute__((pure)) " + line
+        if new_name:
+            line = line.replace("evaluate", new_name)
+        return line
 
-def compile_RF_model(model, model_path, model_name, n_files=1):
-    tl_model = treelite.gallery.sklearn.import_model(model)
-    model_zip = os.path.join(model_path, model_name + ".zip")
-    model_so = model_name + ".so"
-    tl_model.export_srcpkg(platform='unix', toolchain='gcc',
-                           pkgpath=model_zip, libname=model_so,
-                           params={'parallel_comp': n_files},
-                           verbose=True)
-
-
-# Process_XXX came from
-# https://treelite.readthedocs.io/en/0.32/tutorials/builder.html?highlight=process_tree
-def process_test_node(treelite_tree, sklearn_tree, node_id, sklearn_model):
-    # Initialize the test node with given node ID
-    treelite_tree[node_id].set_numerical_test_node(
-                        feature_id=sklearn_tree.feature[node_id],
-                        opname='<=',
-                        threshold=sklearn_tree.threshold[node_id],
-                        default_left=True,
-                        left_child_key=sklearn_tree.children_left[node_id],
-                        right_child_key=sklearn_tree.children_right[node_id])
+    return [clean_line(x) for x in lines]
 
 
-def process_leaf_node(treelite_tree, sklearn_tree, node_id, sklearn_model):
-    # The `value` attribute stores the output for every leaf node.
-    leaf_value = sklearn_tree.value[node_id].squeeze()
-    # Initialize the leaf node with given node ID
-    treelite_tree[node_id].set_leaf_node(leaf_value)
+def write_cmakelist(output_dir, libname=None):
+    cmake_text = """cmake_minimum_required(VERSION 3.12)
+    project(SSTrees CXX)
+    file(GLOB SOURCES "*.cpp")
+    add_library(ssttrees MODULE ${SOURCES})
+    """
+
+    if libname:
+        cmake_text = cmake_text.replace("ssttrees", libname)
+
+    with open(os.path.join(output_dir, "CMakeLists.txt"), 'w') as f:
+        f.write(cmake_text)
 
 
-def process_node(treelite_tree, sklearn_tree, node_id, sklearn_model):
-    if sklearn_tree.children_left[node_id] == -1:  # leaf node
-        process_leaf_node(treelite_tree, sklearn_tree, node_id, sklearn_model)
-    else:                                          # test node
-        process_test_node(treelite_tree, sklearn_tree, node_id, sklearn_model)
+def compile_forest_to_files(model, name, output_dir):
+    files = code_gen.code_gen_ensemble(
+            trees=[e.tree_ for e in model.estimators_],
+            individual_learner_weight=1.0/model.n_estimators,
+            initial_value=0.0, n_jobs=-1)
 
+    files_as_lines = []
+    for f in files:
+        f.seek(0)
+        files_as_lines.append(
+                clean_up_code(
+                    [x.decode("utf-8").rstrip() for x in f.readlines()],
+                    name
+                ))
 
-def process_tree(sklearn_tree, sklearn_model):
-    treelite_tree = treelite.ModelBuilder.Tree()
-    # Node #0 is always root for scikit-learn decision trees
-    treelite_tree[0].set_root()
+    i = 0
+    for filelines in files_as_lines:
+        if any("+=" in line for line in filelines):
+            with open(os.path.join(output_dir, name + ".cpp"), 'w') as f:
+                f.writelines(filelines)
+        else:
+            with open(os.path.join(output_dir, name + "_{}.cpp".format(i)), 'w') as f:
+                f.writelines(filelines)
+            i = i + 1
 
-    # Iterate over each node: node ID ranges from 0 to [node_count]-1
-    for node_id in range(sklearn_tree.node_count):
-        process_node(treelite_tree, sklearn_tree, node_id, sklearn_model)
-
-    return treelite_tree
-
-
-def compile_ETR_model(model, model_path, model_name, n_files=1):
-    model_zip = os.path.join(model_path, model_name + ".zip")
-    model_so = model_name + ".so"
-
-    builder=treelite.ModelBuilder(num_feature=model.n_features_,
-                                  random_forest=True)
-
-    for est in model.estimators_:
-        builder.append(process_tree(est.tree_, model))
-
-    tl_model = builder.commit()
-    tl_model.export_srcpkg(platform='unix', toolchain='gcc',
-                           pkgpath=model_zip, libname=model_so,
-                           params={'parallel_comp': n_files},
-                           verbose=True)
+    return files_as_lines
