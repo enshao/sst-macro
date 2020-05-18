@@ -87,7 +87,7 @@ class TempFiles:
     if not self.doDeleteAll: # attempt to format the files with clangformat
         # taken from https://stackoverflow.com/questions/377017/test-if-executable-exists-in-python/12611523
         clang_format_prog = "clang-format"
-        clang_format = os.path.join(self.clangBin + "bin/", clang_format_prog)
+        clang_format = os.path.join(self.clangBin, "bin", clang_format_prog)
         has_clang_format = os.path.isfile(clang_format) and os.access(clang_format, os.X_OK)
 
         if not has_clang_format: # Look for one in the path
@@ -106,7 +106,7 @@ class TempFiles:
 
         if has_clang_format:
             for f in self.files:
-                cmd = clang_format + " -i -style=llvm " + f 
+                cmd = clang_format + " -i -style=llvm " + f
                 if self.verbose:
                     sys.stderr.write(cmd + "\n")
                 os.system(cmd)
