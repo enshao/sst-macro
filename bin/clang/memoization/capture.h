@@ -54,6 +54,7 @@ Questions? Contact sst-macro-help@sandia.gov
 #include <string>
 #include <utility>
 #include <vector>
+#include <cassert>
 
 namespace memoize {
 #if __cplusplus >= 201703L

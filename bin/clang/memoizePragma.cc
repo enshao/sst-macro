@@ -72,8 +72,14 @@ std::string generateUniqueFunctionName(clang::SourceLocation const &Loc,
 
   auto &SM = CompilerGlobals::SM();
   std::string path = SM.getFilename(Loc).str();
-  Prefix += cleanPath(path) + std::to_string(SM.getPresumedLineNumber(Loc)) +
-            "_memoize";
+  Loc.dump(SM);
+  Prefix += cleanPath(path) + std::to_string(SM.getPresumedLineNumber(Loc));
+
+  if (CompilerGlobals::mode == modes::Mode::MEMOIZE_MODE) {
+    Prefix += "_memoize";
+  } else if (CompilerGlobals::mode == modes::Mode::SKELETONIZE_MODE) {
+    Prefix += "_skel";
+  }
 
   return Prefix;
 }
@@ -118,32 +124,37 @@ parseExprString(std::vector<memoize::ExpressionStrings> const &Exprs, Fn &&f) {
   return out;
 }
 
-std::string declare_start_function(
-    std::string const &FuncName,
-    std::vector<memoize::ExpressionStrings> const &ExprStrs) {
+std::string
+declareFunction(std::string const &RetType, std::string const &FuncName,
+                std::vector<memoize::ExpressionStrings> const &ArgStrs) {
 
-  return sst::strings::replace_all(
-      R"func(
+  auto const *StrBase = R"func(
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-void $name_start($args);
+$ret $name($args);
 
 #ifdef __cplusplus
 }
 #endif
-)func",
-      {{"$name", FuncName},
-       {"$args",
-        parseExprString(ExprStrs, [](memoize::ExpressionStrings const &es) {
-          return es.getSrcFileType();
-        })}});
+)func";
+
+  auto NameReplacement = sst::strings::ReplacementType("$name", FuncName);
+
+  auto ArgsReplacement = sst::strings::ReplacementType(
+      "$args",
+      parseExprString(ArgStrs, [](memoize::ExpressionStrings const &es) {
+        return es.getSrcFileType();
+      }));
+
+  return sst::strings::replace_all(
+      StrBase, {{"$ret", RetType}, NameReplacement, ArgsReplacement});
 }
 
 std::string
-declare_end_function(std::string const &FuncName,
-                     std::vector<memoize::ExpressionStrings> const &) {
+declare_memoize_end_function(std::string const &FuncName,
+                             std::vector<memoize::ExpressionStrings> const &) {
   return sst::strings::replace_all(
       R"func(
 #ifdef __cplusplus
@@ -160,14 +171,15 @@ void $func_end();
 }
 
 std::string
-start_call_site(std::string const &FuncName,
-                std::vector<memoize::ExpressionStrings> const &ExprStrs) {
+writeCallSite(std::string const &FuncName,
+              std::vector<memoize::ExpressionStrings> const &ExprStrs) {
+
   auto call_args =
       parseExprString(ExprStrs, [](memoize::ExpressionStrings const &es) {
         return es.getExprSpelling();
       });
 
-  return sst::strings::replace_all("$func_start($args);",
+  return sst::strings::replace_all("$func($args);",
                                    {{"$func", FuncName}, {"$args", call_args}});
 };
 
@@ -292,6 +304,9 @@ SSTMemoizePragma::SSTMemoizePragma(clang::SourceLocation loc,
     : VariableNames_(parseKeyword(PragmaStrings, "variables")),
       ExtraExpressions_(parseKeyword(PragmaStrings, "extra_exressions")),
       DoAutoCapture_(parseCaptureOptions(VariableNames_)) {
+  llvm::errs() << "Mode is skeletonize: "
+               << (CompilerGlobals::mode == modes::Mode::SKELETONIZE_MODE)
+               << "\n";
 
   /* The following expressions are there to provide places for OPT to replace
      the captures with more information, unfortunately adding more information
@@ -301,7 +316,7 @@ SSTMemoizePragma::SSTMemoizePragma(clang::SourceLocation loc,
   auto &ctx = CompilerGlobals::ASTContext();
   // IR Info
   llvm::APInt api(64, -1);
-  auto ilit = clang::IntegerLiteral::Create(ctx, api, ctx.IntTy, loc);
+  auto *ilit = clang::IntegerLiteral::Create(ctx, api, ctx.IntTy, loc);
   ExprStrs_.emplace_back(ilit); // Stores
   ExprStrs_.emplace_back(ilit); // Loads
 
@@ -311,7 +326,7 @@ SSTMemoizePragma::SSTMemoizePragma(clang::SourceLocation loc,
   auto StrTy = ctx.getPointerType(ConstChar);
 
   clang::StringRef strRef("\"unknown\"");
-  auto target = clang::StringLiteral::Create(
+  auto *target = clang::StringLiteral::Create(
       ctx, strRef, clang::StringLiteral::StringKind::Ascii, false, StrTy, loc);
   ExprStrs_.emplace_back(target); // target
   ExprStrs_.emplace_back(target); // omp_region_attributes
@@ -340,12 +355,12 @@ std::string const &ExpressionStrings::getExprSpelling() const {
   return spelling;
 }
 
-void SSTMemoizePragma::activate(clang::Stmt *S) {
-  for (auto Expr : getAllExprs(S, VariableNames_, DoAutoCapture_)) {
+void SSTMemoizePragma::activateMemoize(clang::Stmt *S) {
+  for (auto const *Expr : getAllExprs(S, VariableNames_, DoAutoCapture_)) {
     ExprStrs_.emplace_back(Expr);
   }
 
-  auto ParentDecl = getNonNull(matchers::getParentDecl(S));
+  auto const *ParentDecl = getNonNull(matchers::getParentDecl(S));
   auto FuncName = generateUniqueFunctionName(getStart(S), ParentDecl, "");
 
   static_capture_decl_ =
@@ -355,20 +370,73 @@ void SSTMemoizePragma::activate(clang::Stmt *S) {
 
   auto &R = CompilerGlobals::rewriter;
   R.InsertTextBefore(getStart(ParentDecl),
-                     declare_start_function(FuncName, ExprStrs_) + "\n");
+                     declareFunction("void", FuncName + "_start", ExprStrs_) +
+                         "\n");
   R.InsertTextBefore(getStart(ParentDecl),
-                     declare_end_function(FuncName, ExprStrs_) + "\n");
+                     declareFunction("void", FuncName + "_end", {}) + "\n");
 
   R.InsertTextBefore(pragmaDirectiveLoc,
-                     start_call_site(FuncName, ExprStrs_) + "\n");
-  if(auto FS = llvm::dyn_cast<clang::ForStmt>(S)){
-  }
-  R.InsertTextAfterToken(getEnd(S), end_call_site(FuncName, ExprStrs_) + "\n");
+                     writeCallSite(FuncName + "_start", ExprStrs_) + "\n");
+  R.InsertTextAfterToken(getEnd(S),
+                         writeCallSite(FuncName + "_end", {}) + "\n");
 }
 
-void SSTMemoizePragma::activate(clang::Decl *D) {}
+void SSTMemoizePragma::activateSkeletonize(clang::Stmt *S) {
+  for (auto const *Expr : getAllExprs(S, VariableNames_, DoAutoCapture_)) {
+    ExprStrs_.emplace_back(Expr);
+  }
+
+  auto const *ParentDecl = getNonNull(matchers::getParentDecl(S));
+  auto FuncName = generateUniqueFunctionName(getStart(S), ParentDecl, "");
+
+  auto &R = CompilerGlobals::rewriter;
+  R.InsertTextBefore(getStart(ParentDecl),
+                     declareFunction("float", FuncName, ExprStrs_) +
+                         "\n");
+  auto CallSite = writeCallSite(FuncName, ExprStrs_);
+  replace(S, "{float val = " + CallSite + "\nsstmac_compute(val);}");
+}
+
+void SSTMemoizePragma::activate(clang::Stmt *S) {
+  switch (CompilerGlobals::mode) {
+  case modes::Mode::MEMOIZE_MODE:
+    return activateMemoize(S);
+  case modes::Mode::SKELETONIZE_MODE:
+    return activateSkeletonize(S);
+  default:
+    return;
+  }
+}
+
+void SSTMemoizePragma::activateMemoize(clang::Decl *D) {}
+void SSTMemoizePragma::activateSkeletonize(clang::Decl *D) {}
+
+void SSTMemoizePragma::activate(clang::Decl *D) {
+  switch (CompilerGlobals::mode) {
+  case modes::Mode::MEMOIZE_MODE:
+    return activateMemoize(D);
+  case modes::Mode::SKELETONIZE_MODE:
+    return activateSkeletonize(D);
+  default:
+    return;
+  }
+}
 
 void SSTMemoizePragma::deactivate() {
+  switch (CompilerGlobals::mode) {
+  case modes::Mode::MEMOIZE_MODE:
+    return deactivateMemoize();
+  case modes::Mode::SKELETONIZE_MODE:
+    return deactivateSkeletonize();
+  default:
+    return;
+  }
+}
+
+// Not clear what I'll need here yet
+void SSTMemoizePragma::deactivateSkeletonize() {}
+
+void SSTMemoizePragma::deactivateMemoize() {
   std::string headers = R"lit(
   #include "capture.h"
   #if defined(_OPENMP)
@@ -381,8 +449,6 @@ void SSTMemoizePragma::deactivate() {
   )lit";
 
   auto &vec = CompilerGlobals::toolInfoRegistration.globalCppFunctionsToWrite;
-  auto pragma = static_cast<SSTPragma *>(this);
-
   if (std::none_of(vec.begin(), vec.end(), [&](auto const &pragma_string) {
         return pragma_string.second == headers;
       })) {
@@ -396,7 +462,10 @@ void SSTMemoizePragma::deactivate() {
 } // namespace memoize
 
 static PragmaRegister<SSTArgMapPragmaShim, memoize::SSTMemoizePragma, true>
-    memoizePragma("sst", "memoize", modes::MEMOIZE);
+    memoizePragma("sst", "memoize", modes::MEMOIZE /* | modes::SKELETONIZE */);
 
 static PragmaRegister<SSTArgMapPragmaShim, memoize::SSTMemoizeOMPPragma, false>
     ompMemoizePragma("omp", "parallel", modes::MEMOIZE);
+
+static PragmaRegister<SSTArgMapPragmaShim, memoize::SSTMemoizeOMPPragma, true>
+    ompMemoizePragma2("omp", "parallel", modes::SKELETONIZE);

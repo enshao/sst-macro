@@ -375,7 +375,8 @@ static PragmaRegister<SSTNoArgsPragmaShim, SSTComputePragma, true> alwaysCompute
     "sst", "always_compute", SKELETONIZE | SHADOWIZE | ENCAPSULATE);
 // static PragmaRegister<SSTArgMapPragmaShim, SSTMemoizeComputePragma, true> memoizePragma(
 //     "sst", "memoize", MEMOIZE | SKELETONIZE);
-static PragmaRegister<SSTTokenListPragmaShim, SSTOpenMPParallelPragma, true> ompPragmaSkel(
-    "omp", "parallel", SKELETONIZE);
+//     TODO eventually I'll have to intelligently enable this depending
+// static PragmaRegister<SSTTokenListPragmaShim, SSTOpenMPParallelPragma, true> ompPragmaSkel(
+//     "omp", "parallel", SKELETONIZE);
 static PragmaRegister<SSTTokenListPragmaShim, SSTOpenMPParallelPragma, false> ompPragmaPup(
     "omp", "parallel", PUPPETIZE);

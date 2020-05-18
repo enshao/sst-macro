@@ -87,6 +87,15 @@ public:
   void deactivate() override;
 
 private:
+  void activateMemoize(clang::Stmt *S);
+  void activateSkeletonize(clang::Stmt *S);
+
+  void activateMemoize(clang::Decl *D);
+  void activateSkeletonize(clang::Decl *D);
+
+  void deactivateMemoize();
+  void deactivateSkeletonize();
+
   std::optional<std::vector<std::string>> VariableNames_;
   std::optional<std::vector<std::string>> ExtraExpressions_;
 

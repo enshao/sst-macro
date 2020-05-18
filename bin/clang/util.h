@@ -222,6 +222,8 @@ std::string replace_all(std::string const &str, std::string const& match,
 std::string replace_all(std::string const &str,
     std::map<std::string, std::string> const& replacements);
 
+using ReplacementType = std::map<std::string, std::string>::value_type;
+
 } // namespace strings
 } // namespace sst
 
