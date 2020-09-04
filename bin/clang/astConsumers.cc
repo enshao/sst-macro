@@ -70,10 +70,7 @@ SkeletonASTConsumer::HandleTopLevelDecl(DeclGroupRef DR)
         FunctionDecl* fd = cast<FunctionDecl>(d);
         //the function decl will have its body filled in later
         //possibly - we need to make sure to only add the function once
-        if (fd->isThisDeclarationADefinition()){
-          //also, we only really care about the definition anyway
-          allTopLevelDecls_.push_back(d);
-        }
+        allTopLevelDecls_.push_back(d);
         if (isNullWhitelisted(fd->getNameAsString())){
           CompilerGlobals::astNodeMetadata.nullSafeFunctions[fd] = nullptr;
         }

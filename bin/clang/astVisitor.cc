@@ -1040,6 +1040,9 @@ SkeletonASTVisitor::TraverseCallExpr(CallExpr* expr, DataRecursionQueue*  /*queu
     PragmaActivateGuard pag(expr, this);
     if (pag.skipVisit()) return true;
 
+    //first go into the call expression to see if we should even keep it
+    //we might get a delete exception, in which case we should
+    //if we got here, we are safe to modify the function name
     if (CompilerGlobals::modeActive(SKELETONIZE | SHADOWIZE)) {
       Expr* fxn = getUnderlyingExpr(const_cast<Expr*>(expr->getCallee()));
       if (fxn->getStmtClass() == Stmt::DeclRefExprClass){
@@ -1939,6 +1942,9 @@ SkeletonASTVisitor::traverseFunctionBody(clang::Stmt* s)
 bool
 SkeletonASTVisitor::TraverseFunctionDecl(clang::FunctionDecl* D)
 {
+  if (!D->isThisDeclarationADefinition()){
+    return true;
+  }
   if (D->isMain() && CompilerGlobals::refactorMain){
     replaceMain(D);
   } else if (D->isTemplateInstantiation()   
@@ -2699,7 +2705,10 @@ bool
 FirstPassASTVisitor::TraverseFunctionDecl(FunctionDecl *fd, DataRecursionQueue* /*queue*/)
 {
   PushGuard<FunctionDecl*> pg(CompilerGlobals::astContextLists.enclosingFunctionDecls, fd);
-  Parent::TraverseFunctionDecl(fd);
+  PragmaActivateGuard pag(fd, this, true/*always do first pass pragmas*/);
+  if (fd->isThisDeclarationADefinition()){
+    Parent::TraverseFunctionDecl(fd);
+  }
   return true;
 }
 
